@@ -7,6 +7,7 @@ mod oauth;
 mod probe;
 mod quota;
 mod store;
+mod watchdog;
 mod zcrypto;
 
 use serde_json::{json, Value};
@@ -845,6 +846,9 @@ async fn set_behavior(
     close_to_tray: Option<bool>,
     hot_switch: Option<bool>,
     auto_claim: Option<bool>,
+    auto_switch: Option<bool>,
+    auto_continue: Option<bool>,
+    auto_continue_text: Option<String>,
 ) -> Result<(), String> {
     let _guard = store_guard();
     let paths = Paths::detect();
@@ -861,7 +865,18 @@ async fn set_behavior(
     if let Some(v) = auto_claim {
         s.auto_claim = Some(v);
     }
+    if let Some(v) = auto_switch {
+        s.auto_switch = Some(v);
+    }
+    if let Some(v) = auto_continue {
+        s.auto_continue = Some(v);
+    }
+    if let Some(v) = auto_continue_text {
+        s.auto_continue_text = Some(v);
+    }
     let r = save_settings(&paths, &s);
+    watchdog::set_enabled(s.auto_continue());
+    watchdog::set_text(s.auto_continue_text());
     rebuild_tray(&app);
     let _ = app.emit("state-changed", ());
     r
@@ -1190,6 +1205,12 @@ pub fn run() {
             if let Ok(data_dir) = app.path().app_local_data_dir() {
                 flowlog::init(&data_dir);
             }
+            {
+                let s = store::load_settings(&Paths::detect());
+                watchdog::set_enabled(s.auto_continue());
+                watchdog::set_text(s.auto_continue_text());
+            }
+            watchdog::spawn(app.handle().clone());
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().expect("no window icon").clone())
                 .tooltip("Z·SWITCH")

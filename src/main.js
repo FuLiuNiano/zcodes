@@ -12,9 +12,38 @@ let appVer = "";
 let acctQuota = {};
 let claimable = {};
 let claimAllRunning = false;
+
+// 额度持久化：重启后立即显示上次结果，后台静默刷新
+const QUOTA_CACHE_KEY = "zsw_acctQuota_v1";
+function loadQuotaCache() {
+  try {
+    const raw = localStorage.getItem(QUOTA_CACHE_KEY);
+    const saved = raw ? JSON.parse(raw) : null;
+    if (saved && typeof saved === "object") acctQuota = saved;
+  } catch {}
+}
+function saveQuotaCache() {
+  try {
+    const out = {};
+    for (const [id, v] of Object.entries(acctQuota)) {
+      if (v && v.data && !v.busy) out[id] = { data: v.data, err: null, busy: false };
+    }
+    localStorage.setItem(QUOTA_CACHE_KEY, JSON.stringify(out));
+  } catch {}
+}
 const REFRESH_CLAIM_COOLDOWN_MS = 60_000;
 let refreshClaim = { running: false, done: 0, total: 0, cooldownUntil: 0 };
 let refreshTicker = null;
+
+// 新号套餐池异步到账：有套餐壳但没额度池时 1 分钟后自动重查
+const quotaPendingRetries = {};
+const QUOTA_PENDING_MAX_RETRIES = 10;
+function quotaNeedsRetrial(data) {
+  if (!data) return false;
+  const plans = data.plans || [];
+  const planItems = plans.reduce((n, p) => n + (p.items || []).length, 0);
+  return plans.length > 0 && !(data.items || []).length && !planItems;
+}
 
 const AUTO_CLAIM_INTERVAL_MS = 10 * 60 * 1000;
 const AUTO_CLAIM_FIRST_DELAY_MS = 2 * 60 * 1000;
@@ -28,6 +57,12 @@ let autoAbortRequested = false;
 let claimActive = false;
 let lastAutoRound = null;
 let autoToggleBusy = false;
+
+const AUTO_SWITCH_INTERVAL_MS = 3 * 60 * 1000;
+const AUTO_SWITCH_FIRST_DELAY_MS = 90 * 1000;
+const AUTO_SWITCH_EMPTY_COOLDOWN_MS = 30 * 60 * 1000;
+let autoSwitchRunning = false;
+let autoSwitchCooldownUntil = 0;
 
 const NOTCH_COLORS = ["var(--notch-1)", "var(--notch-2)", "var(--notch-3)", "var(--notch-4)", "var(--notch-5)", "var(--notch-6)"];
 function notchColor(id) {
@@ -78,14 +113,25 @@ async function guard(fn) {
 async function loadAcctQuota(id) {
   const cur = acctQuota[id] || {};
   if (cur.busy) return;
-  acctQuota[id] = { busy: true };
+  acctQuota[id] = { ...(cur.data ? { data: cur.data } : {}), busy: true };  // 刷新时保留旧数据展示
   if (!uiLocked()) render();
   try {
     const data = await invoke("get_account_quota", { id });
     acctQuota[id] = { data, err: null, busy: false };
+    if (quotaNeedsRetrial(data) && (quotaPendingRetries[id] || 0) < QUOTA_PENDING_MAX_RETRIES) {
+      quotaPendingRetries[id] = (quotaPendingRetries[id] || 0) + 1;
+      quotaDue[id] = Date.now() + 60_000;
+    } else {
+      quotaPendingRetries[id] = 0;
+    }
   } catch (e) {
-    acctQuota[id] = { data: null, err: stripErr(e), busy: false };
+    if (cur.data) {
+      acctQuota[id] = { data: cur.data, err: null, busy: false };  // 查询失败保留旧值
+    } else {
+      acctQuota[id] = { data: null, err: stripErr(e), busy: false };
+    }
   }
+  saveQuotaCache();
   if (!uiLocked()) render();
 }
 
@@ -360,6 +406,30 @@ const actions = {
     }
   },
 
+  async refreshClaimOne(id) {
+    if (refreshClaim.running || claimAllRunning) { toast(t("m.claimBusy"), "warn"); return; }
+    if (autoClaimRunning) { toast(t("m.claimBusy"), "warn"); return; }
+    const name = accountName(id);
+    claimable[id] = { ...(claimable[id] || {}), busy: true };
+    if (!uiLocked()) render();
+    try {
+      const r = await invoke("claim_refresh", { id });
+      claimable[id] = { plans: r.plans || [], err: null, busy: false };
+      const n = (r.plans || []).length;
+      if (r.activationError) {
+        toast(t("m.refreshOneErr", { name, err: stripErr(r.activationError) }), "warn");
+      } else if (n) {
+        toast(t("m.refreshOneOk", { name, n }), "ok", t("m.refreshOneOkDetail"));
+      } else {
+        toast(t("m.refreshOneNone", { name }));
+      }
+    } catch (e) {
+      claimable[id] = { ...(claimable[id] || {}), err: String(e), busy: false };
+      toast(t("m.refreshOneErr", { name, err: stripErr(e) }), "err");
+    }
+    if (!uiLocked()) render();
+  },
+
   async refreshClaim() {
     const ids = (state?.accounts || []).map((a) => a.id);
     if (!ids.length) return;
@@ -433,6 +503,33 @@ const actions = {
       } else {
         lastAutoRound = null;
       }
+    } catch (e) { toast(stripErr(e), "err"); }
+    finally { autoToggleBusy = false; }
+  },
+
+  async toggleAutoSwitch() {
+    if (autoToggleBusy) return;
+    const next = !state.auto_switch;
+    autoToggleBusy = true;
+    try {
+      await invoke("set_behavior", { autoSwitch: next });
+      await refresh();
+      render();
+      toast(next ? t("m.autoSwitchOn") : t("m.autoSwitchOff"), "ok");
+      if (next) setTimeout(autoSwitchTick, 1500);
+    } catch (e) { toast(stripErr(e), "err"); }
+    finally { autoToggleBusy = false; }
+  },
+
+  async toggleAutoContinue() {
+    if (autoToggleBusy) return;
+    const next = !state.auto_continue;
+    autoToggleBusy = true;
+    try {
+      await invoke("set_behavior", { autoContinue: next });
+      await refresh();
+      render();
+      toast(next ? t("m.autoContinueOn") : t("m.autoContinueOff"), "ok");
     } catch (e) { toast(stripErr(e), "err"); }
     finally { autoToggleBusy = false; }
   },
@@ -529,6 +626,70 @@ async function autoClaimTick() {
     autoClaimRunning = false; claimActive = false;
     if (state?.auto_claim) lastAutoRound = { at: Date.now(), claimed: roundClaimed, skipped: roundSkipped };
     if (!uiLocked()) render();
+  }
+}
+
+function itemExhausted(it) {
+  if (it == null) return null;
+  if (it.remaining != null && it.total != null && it.total > 0) return it.remaining <= 0;
+  if (it.percent_used != null) return it.percent_used >= 100;
+  return null;
+}
+
+function quotaExhausted(data) {
+  if (!data) return false;
+  const groups = (Array.isArray(data.plans) && data.plans.length) ? data.plans : [data];
+  const items = [];
+  for (const g of groups) for (const it of (g.items || [])) items.push(it);
+  if (!items.length) return false;
+  const wins = items.filter((it) => itemKind(it) !== "raw");
+  const pools = items.filter((it) => itemKind(it) === "raw");
+  for (const it of wins) {
+    if ((it.percent_used ?? 0) >= 100) return true;
+    if (itemExhausted(it) === true) return true;
+  }
+  if (pools.length) {
+    const judgable = pools.filter((it) => itemExhausted(it) !== null);
+    if (judgable.length && judgable.every((it) => itemExhausted(it) === true)) return true;
+  }
+  return false;
+}
+
+async function autoSwitchTick() {
+  if (!state?.auto_switch || autoSwitchRunning) return;
+  if (Date.now() < autoSwitchCooldownUntil) return;
+  if (claimActive || claimAllRunning || refreshClaim.running || autoClaimRunning) return;
+  const accounts = state.accounts || [];
+  const active = accounts.find((a) => a.is_active);
+  if (!active || accounts.length < 2) return;
+  autoSwitchRunning = true;
+  try {
+    let cur;
+    try { cur = await invoke("get_account_quota", { id: active.id }); }
+    catch { return; }
+    if (!quotaExhausted(cur)) return;
+    const ai = accounts.findIndex((a) => a.id === active.id);
+    for (let i = 1; i < accounts.length; i++) {
+      const cand = accounts[(ai + i) % accounts.length];
+      let cq;
+      try { cq = await invoke("get_account_quota", { id: cand.id }); } catch { continue; }
+      if (quotaExhausted(cq)) continue;
+      try {
+        const r = await invoke("switch_to", { id: cand.id, force: true, restart: state.launch_after_switch });
+        toast(t("m.autoSwitchDone", { from: active.name, to: r.name }), "ok", t("m.autoSwitchDoneDetail"));
+      } catch (e) {
+        toast(t("m.autoSwitchFail", { to: cand.name, err: stripErr(e) }), "err");
+      }
+      await refresh();
+      render();
+      enrollAccounts();
+      pokeAccount(cand.id);
+      return;
+    }
+    autoSwitchCooldownUntil = Date.now() + AUTO_SWITCH_EMPTY_COOLDOWN_MS;
+    toast(t("m.autoSwitchAllEmpty"), "warn");
+  } finally {
+    autoSwitchRunning = false;
   }
 }
 
@@ -788,6 +949,7 @@ function render() {
           <div class="row-meta">${meta}</div>
         </div>
         <div class="row-actions">
+          <button class="icon-btn" title="${t("btn.refreshOne")}" aria-label="${t("btn.refreshOne")}" click="actions.refreshClaimOne('${a.id}')" ${refreshClaim.running || claimAllRunning || autoClaimRunning ? "disabled" : ""}>${ic("refresh", 16)}</button>
           <button class="icon-btn" title="${t("btn.quota")}" aria-label="${t("btn.quota")}" click="actions.acctQuota('${a.id}')">${ic("gauge", 16)}</button>
           <button class="icon-btn" title="${t("btn.rename")}" aria-label="${t("btn.rename")}" click="actions.rename('${a.id}')">${ic("pen", 16)}</button>
           <button class="icon-btn" title="${t("btn.export")}" aria-label="${t("btn.export")}" click="actions.exportOne('${a.id}')">${ic("export", 16)}</button>
@@ -846,6 +1008,20 @@ function render() {
         click="actions.toggleAutoClaim()">
         <span class="toggle${s.auto_claim ? " on" : ""}" aria-hidden="true"><span class="knob"></span></span>
         ${t("btn.autoClaim")}
+      </button>
+      <button class="tog-inline${s.auto_switch ? " on" : ""}"
+        role="switch" aria-checked="${s.auto_switch}" aria-label="${t("btn.autoSwitch")}"
+        title="${t("btn.autoSwitchTitle")}"
+        click="actions.toggleAutoSwitch()">
+        <span class="toggle${s.auto_switch ? " on" : ""}" aria-hidden="true"><span class="knob"></span></span>
+        ${t("btn.autoSwitch")}
+      </button>
+      <button class="tog-inline${s.auto_continue ? " on" : ""}"
+        role="switch" aria-checked="${s.auto_continue}" aria-label="${t("btn.autoContinue")}"
+        title="${t("btn.autoContinueTitle")}"
+        click="actions.toggleAutoContinue()">
+        <span class="toggle${s.auto_continue ? " on" : ""}" aria-hidden="true"><span class="knob"></span></span>
+        ${t("btn.autoContinue")}
       </button>
       <button class="btn-ghost has-ic" click="actions.addAccount()" title="${t("btn.addAccountTitle")}">${ic("userPlus", 16)} ${t("btn.addAccount")}</button>
       ${s.zcode_running
@@ -913,6 +1089,12 @@ listen("captcha://interactive", () => {
   claimWaiter.finish({ ok: false, code: "interactive" });
 });
 
+listen("watchdog://continue", (ev) => {
+  const p = ev.payload || {};
+  if (p.ok) toast(t("m.autoContinueSent", { text: p.text }), "ok");
+  else toast(t("m.autoContinueFail", { err: p.error || t("m.unknownErr") }), "err");
+});
+
 listen("oauth://done", (ev) => {
   const p = ev.payload || {};
   if (p.ok === false) {
@@ -974,6 +1156,7 @@ async function sweepTick() {
 (async () => {
   try {
     appVer = await invoke("app_version").catch(() => "");
+    loadQuotaCache();   // 启动先展示上次的额度，后台再刷新
     await refresh();
     render();
     await invoke("reveal_main");
@@ -986,6 +1169,8 @@ async function sweepTick() {
     setInterval(sweepTick, TICK_MS);
     setTimeout(autoClaimTick, AUTO_CLAIM_FIRST_DELAY_MS);
     setInterval(autoClaimTick, AUTO_CLAIM_INTERVAL_MS);
+    setTimeout(autoSwitchTick, AUTO_SWITCH_FIRST_DELAY_MS);
+    setInterval(autoSwitchTick, AUTO_SWITCH_INTERVAL_MS);
   } catch (e) {
     $app.innerHTML = `<div class="loading" style="color:var(--red)">${t("common.loadFail", { e: esc(stripErr(e)) })}</div>`;
     invoke("reveal_main").catch(() => {});

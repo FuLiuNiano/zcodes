@@ -201,6 +201,8 @@ pub fn run(args: &[String]) -> (String, i32) {
         "behavior" => {
             let las = flag(rest, "--launch-after-switch");
             let ctt = flag(rest, "--close-to-tray");
+            let asc = flag(rest, "--auto-switch");
+            let auc = flag(rest, "--auto-continue");
             let mut s = load_settings(&paths);
             if let Some(v) = las {
                 s.launch_after_switch = Some(parse_bool(&v));
@@ -208,10 +210,18 @@ pub fn run(args: &[String]) -> (String, i32) {
             if let Some(v) = ctt {
                 s.close_to_tray = Some(parse_bool(&v));
             }
+            if let Some(v) = asc {
+                s.auto_switch = Some(parse_bool(&v));
+            }
+            if let Some(v) = auc {
+                s.auto_continue = Some(parse_bool(&v));
+            }
             match save_settings(&paths, &s) {
                 Ok(()) => ok(json!({
                     "launch_after_switch": s.launch_after_switch(),
                     "close_to_tray": s.close_to_tray(),
+                    "auto_switch": s.auto_switch(),
+                    "auto_continue": s.auto_continue(),
                 })),
                 Err(e) => return (err(&e), 1),
             }
