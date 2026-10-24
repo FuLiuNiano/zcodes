@@ -76,6 +76,17 @@ const actions = {
     });
   },
 
+  async checkContinue() {
+    await guard(async () => {
+      const r = await invoke("continue_diagnostics");
+      if (r && r.ok) {
+        toast(t("s.continueOk", { rt: r.runtime }), "ok", `${r.cli}${r.version ? " · " + r.version : ""}`);
+      } else {
+        toast(t("s.continueBad"), "err", (r && r.error) || t("m.unknownErr"));
+      }
+    });
+  },
+
   async exportAll() {
     await guard(async () => {
       const p = await invoke("export_all_pick_path");
@@ -197,6 +208,10 @@ function render() {
           placeholder="${t("s.continueTextPh")}" keydown="onContinueKey(event)">
         <button class="btn-ghost" click="actions.saveContinueText()">${t("common.save")}</button>
       </div>
+      <div class="lib-row" style="margin-top:6px">
+        <button class="btn-ghost" click="actions.checkContinue()">${t("s.continueCheck")}</button>
+      </div>
+      <div class="hint">${t("s.continueCheckDesc")}</div>
       <label style="margin-top:14px">${t("s.authLabel")}</label>
       ${toggle(s.auth_proxy_on, "actions.toggleAuthProxy()", t("s.proxyToggle"), t("s.proxyToggleDesc"))}
       <div class="path-line" style="margin-top:6px">

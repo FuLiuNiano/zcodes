@@ -265,7 +265,7 @@ const actions = {
   async doSwitch(id, force) {
     await guard(async () => {
       const restart = state.launch_after_switch;
-      const r = await invoke("switch_to", { id, force, restart });
+      const r = await invoke("switch_to", { id, force, restart, hot: state.hot_switch });
       if (r.already_active) {
         toast(t("m.toastAlready", { name: r.name }), "ok");
       } else {
@@ -675,7 +675,8 @@ async function autoSwitchTick() {
       try { cq = await invoke("get_account_quota", { id: cand.id }); } catch { continue; }
       if (quotaExhausted(cq)) continue;
       try {
-        const r = await invoke("switch_to", { id: cand.id, force: true, restart: state.launch_after_switch });
+        // 自动切换必须「不退出 ZCode」：显式 hot，禁止杀掉/重启客户端
+        const r = await invoke("switch_to", { id: cand.id, force: false, restart: false, hot: true });
         toast(t("m.autoSwitchDone", { from: active.name, to: r.name }), "ok", t("m.autoSwitchDoneDetail"));
       } catch (e) {
         toast(t("m.autoSwitchFail", { to: cand.name, err: stripErr(e) }), "err");
@@ -1091,8 +1092,10 @@ listen("captcha://interactive", () => {
 
 listen("watchdog://continue", (ev) => {
   const p = ev.payload || {};
-  if (p.ok) toast(t("m.autoContinueSent", { text: p.text }), "ok");
-  else toast(t("m.autoContinueFail", { err: p.error || t("m.unknownErr") }), "err");
+  // 精准路由失败时把会话 id 一起显示出来，方便手动定位那条会话
+  const sess = p.sess || "";
+  if (p.ok) toast(t("m.autoContinueSent", { text: p.text }), "ok", sess);
+  else toast(t("m.autoContinueFail", { err: p.error || t("m.unknownErr") }), "err", sess);
 });
 
 listen("oauth://done", (ev) => {

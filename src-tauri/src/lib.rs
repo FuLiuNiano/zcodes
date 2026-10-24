@@ -195,13 +195,35 @@ async fn update_account_from_live(app: AppHandle, id: String) -> Result<Account,
 }
 
 #[tauri::command]
-async fn switch_to(app: AppHandle, id: String, force: bool, restart: bool) -> Result<SwitchResult, String> {
+async fn switch_to(
+    app: AppHandle,
+    id: String,
+    force: bool,
+    restart: bool,
+    hot: Option<bool>,
+) -> Result<SwitchResult, String> {
     let _guard = store_guard();
     let paths = Paths::detect();
-    let hot = load_settings(&paths).hot_switch();
+    // hot 由调用方显式决定：自动切换永远传 true（不退出 ZCode），
+    // 手动切换不传则沿用设置项。
+    let hot = hot.unwrap_or_else(|| load_settings(&paths).hot_switch());
     let r = store::switch_to(&paths, &id, force, restart, hot);
+    if let Ok(ref res) = r {
+        if res.hot && store::zcode_running() {
+            // 热切换只换了磁盘上的登录态，运行中的客户端要重新加载才认新账号。
+            match watchdog::reload_zcode_ui() {
+                Ok(()) => eprintln!("[zsw] 热切换完成，已让 ZCode 重新加载界面"),
+                Err(e) => eprintln!("[zsw] 热切换完成，但刷新 ZCode 界面失败: {e}"),
+            }
+        }
+    }
     rebuild_tray(&app);
     r
+}
+
+#[tauri::command]
+fn continue_diagnostics() -> serde_json::Value {
+    watchdog::diagnostics()
 }
 
 #[tauri::command]
@@ -1157,6 +1179,7 @@ pub fn run() {
             delete_account,
             update_account_from_live,
             switch_to,
+            continue_diagnostics,
             get_live_quota,
             get_account_quota,
             claim_preview,
