@@ -7,7 +7,6 @@ mod oauth;
 mod probe;
 mod quota;
 mod store;
-mod watchdog;
 mod zcrypto;
 
 use serde_json::{json, Value};
@@ -208,23 +207,16 @@ async fn switch_to(
     // 手动切换不传则沿用设置项。
     let hot = hot.unwrap_or_else(|| load_settings(&paths).hot_switch());
     let r = store::switch_to(&paths, &id, force, restart, hot);
-    if let Ok(ref res) = r {
-        if res.hot && store::zcode_running() {
-            // 热切换只换了磁盘上的登录态，运行中的客户端要重新加载才认新账号。
-            match watchdog::reload_zcode_ui() {
-                Ok(()) => eprintln!("[zsw] 热切换完成，已让 ZCode 重新加载界面"),
-                Err(e) => eprintln!("[zsw] 热切换完成，但刷新 ZCode 界面失败: {e}"),
-            }
-        }
-    }
     rebuild_tray(&app);
     r
 }
 
+/// 当前正在使用的模型名，供「额度用尽自动切换」按模型判断
 #[tauri::command]
-fn continue_diagnostics() -> serde_json::Value {
-    watchdog::diagnostics()
+fn current_model() -> Option<String> {
+    store::current_model()
 }
+
 
 #[tauri::command]
 async fn get_live_quota() -> Result<quota::QuotaOverview, String> {
@@ -869,8 +861,6 @@ async fn set_behavior(
     hot_switch: Option<bool>,
     auto_claim: Option<bool>,
     auto_switch: Option<bool>,
-    auto_continue: Option<bool>,
-    auto_continue_text: Option<String>,
 ) -> Result<(), String> {
     let _guard = store_guard();
     let paths = Paths::detect();
@@ -890,15 +880,7 @@ async fn set_behavior(
     if let Some(v) = auto_switch {
         s.auto_switch = Some(v);
     }
-    if let Some(v) = auto_continue {
-        s.auto_continue = Some(v);
-    }
-    if let Some(v) = auto_continue_text {
-        s.auto_continue_text = Some(v);
-    }
     let r = save_settings(&paths, &s);
-    watchdog::set_enabled(s.auto_continue());
-    watchdog::set_text(s.auto_continue_text());
     rebuild_tray(&app);
     let _ = app.emit("state-changed", ());
     r
@@ -1179,7 +1161,7 @@ pub fn run() {
             delete_account,
             update_account_from_live,
             switch_to,
-            continue_diagnostics,
+            current_model,
             get_live_quota,
             get_account_quota,
             claim_preview,
@@ -1228,12 +1210,6 @@ pub fn run() {
             if let Ok(data_dir) = app.path().app_local_data_dir() {
                 flowlog::init(&data_dir);
             }
-            {
-                let s = store::load_settings(&Paths::detect());
-                watchdog::set_enabled(s.auto_continue());
-                watchdog::set_text(s.auto_continue_text());
-            }
-            watchdog::spawn(app.handle().clone());
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().expect("no window icon").clone())
                 .tooltip("Z·SWITCH")

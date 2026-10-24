@@ -521,18 +521,6 @@ const actions = {
     finally { autoToggleBusy = false; }
   },
 
-  async toggleAutoContinue() {
-    if (autoToggleBusy) return;
-    const next = !state.auto_continue;
-    autoToggleBusy = true;
-    try {
-      await invoke("set_behavior", { autoContinue: next });
-      await refresh();
-      render();
-      toast(next ? t("m.autoContinueOn") : t("m.autoContinueOff"), "ok");
-    } catch (e) { toast(stripErr(e), "err"); }
-    finally { autoToggleBusy = false; }
-  },
 };
 
 function startRefreshTicker() {
@@ -636,23 +624,35 @@ function itemExhausted(it) {
   return null;
 }
 
-function quotaExhausted(data) {
+// 正在使用的模型对应的额度桶（同名可能跨多个套餐，全部取出来）
+function modelBuckets(items, model) {
+  const want = String(model || "").trim().toLowerCase();
+  if (!want) return null;
+  const mine = items.filter((it) => String(it.name || "").trim().toLowerCase() === want);
+  return mine.length ? mine : null;
+}
+
+// 判定「额度用尽」。model 为当前正在使用的模型名；
+// 现代账号的 items 是按模型分的额度桶（GLM-5.3-Flash / GLM-5.3…），
+// 旧逻辑只认得「提示次数/使用时长」，会把模型桶全判成 raw，
+// 结果要等所有模型都打光才换号 —— 只打光正在用的那个模型不会触发。
+function quotaExhausted(data, model) {
   if (!data) return false;
   const groups = (Array.isArray(data.plans) && data.plans.length) ? data.plans : [data];
   const items = [];
   for (const g of groups) for (const it of (g.items || [])) items.push(it);
   if (!items.length) return false;
+  const dead = (it) => itemExhausted(it) === true || (it.percent_used ?? 0) >= 100;
+  const mine = modelBuckets(items, model);
+  if (mine) return mine.every(dead);
   const wins = items.filter((it) => itemKind(it) !== "raw");
-  const pools = items.filter((it) => itemKind(it) === "raw");
-  for (const it of wins) {
-    if ((it.percent_used ?? 0) >= 100) return true;
-    if (itemExhausted(it) === true) return true;
-  }
-  if (pools.length) {
-    const judgable = pools.filter((it) => itemExhausted(it) !== null);
-    if (judgable.length && judgable.every((it) => itemExhausted(it) === true)) return true;
-  }
-  return false;
+  if (wins.length && wins.some(dead)) return true;
+  const judgable = items.filter((it) => itemExhausted(it) !== null || it.percent_used != null);
+  return judgable.length > 0 && judgable.every(dead);
+}
+
+async function currentModelName() {
+  try { return String((await invoke("current_model")) || ""); } catch { return ""; }
 }
 
 async function autoSwitchTick() {
@@ -661,23 +661,32 @@ async function autoSwitchTick() {
   if (claimActive || claimAllRunning || refreshClaim.running || autoClaimRunning) return;
   const accounts = state.accounts || [];
   const active = accounts.find((a) => a.is_active);
-  if (!active || accounts.length < 2) return;
+  // 当前登录可能还没存进账号库（is_active 全为 false）：这时用 live 登录的额度判断，
+  // 否则 find() 拿到 undefined 就 return，自动切换永远不会触发。
+  if (!active && !state.live_logged_in) return;
+  if (accounts.length < (active ? 2 : 1)) return;
   autoSwitchRunning = true;
   try {
+    const model = await currentModelName();
     let cur;
-    try { cur = await invoke("get_account_quota", { id: active.id }); }
-    catch { return; }
-    if (!quotaExhausted(cur)) return;
-    const ai = accounts.findIndex((a) => a.id === active.id);
-    for (let i = 1; i < accounts.length; i++) {
-      const cand = accounts[(ai + i) % accounts.length];
+    try {
+      cur = active ? await invoke("get_account_quota", { id: active.id }) : await invoke("get_live_quota");
+    } catch { return; }
+    if (!quotaExhausted(cur, model)) return;
+    const fromName = active
+      ? active.name
+      : (state.live_identity?.display_name || state.live_identity?.email || t("m.liveAccount"));
+    const ai = active ? accounts.findIndex((a) => a.id === active.id) : -1;
+    for (let i = 0; i < accounts.length; i++) {
+      const cand = accounts[(ai + 1 + i + accounts.length) % accounts.length];
+      if (!cand || (active && cand.id === active.id)) continue;
       let cq;
       try { cq = await invoke("get_account_quota", { id: cand.id }); } catch { continue; }
-      if (quotaExhausted(cq)) continue;
+      if (quotaExhausted(cq, model)) continue;
       try {
         // 自动切换必须「不退出 ZCode」：显式 hot，禁止杀掉/重启客户端
         const r = await invoke("switch_to", { id: cand.id, force: false, restart: false, hot: true });
-        toast(t("m.autoSwitchDone", { from: active.name, to: r.name }), "ok", t("m.autoSwitchDoneDetail"));
+        toast(t("m.autoSwitchDone", { from: fromName, to: r.name }), "ok", t("m.autoSwitchDoneDetail"));
       } catch (e) {
         toast(t("m.autoSwitchFail", { to: cand.name, err: stripErr(e) }), "err");
       }
@@ -1017,13 +1026,6 @@ function render() {
         <span class="toggle${s.auto_switch ? " on" : ""}" aria-hidden="true"><span class="knob"></span></span>
         ${t("btn.autoSwitch")}
       </button>
-      <button class="tog-inline${s.auto_continue ? " on" : ""}"
-        role="switch" aria-checked="${s.auto_continue}" aria-label="${t("btn.autoContinue")}"
-        title="${t("btn.autoContinueTitle")}"
-        click="actions.toggleAutoContinue()">
-        <span class="toggle${s.auto_continue ? " on" : ""}" aria-hidden="true"><span class="knob"></span></span>
-        ${t("btn.autoContinue")}
-      </button>
       <button class="btn-ghost has-ic" click="actions.addAccount()" title="${t("btn.addAccountTitle")}">${ic("userPlus", 16)} ${t("btn.addAccount")}</button>
       ${s.zcode_running
         ? `<button class="btn-ghost has-ic" click="actions.askKill()" title="${t("btn.killZcode")}">${ic("power", 16)} ${t("btn.killZcode")}</button>`
@@ -1088,14 +1090,6 @@ listen("captcha://interactive", () => {
   autoClaimCooldown[id] = Date.now() + 60 * 60 * 1000;
   toast(t("m.autoClaimInteractive", { name: accountName(id) }), "warn", t("m.autoClaimInteractiveDetail"));
   claimWaiter.finish({ ok: false, code: "interactive" });
-});
-
-listen("watchdog://continue", (ev) => {
-  const p = ev.payload || {};
-  // 精准路由失败时把会话 id 一起显示出来，方便手动定位那条会话
-  const sess = p.sess || "";
-  if (p.ok) toast(t("m.autoContinueSent", { text: p.text }), "ok", sess);
-  else toast(t("m.autoContinueFail", { err: p.error || t("m.unknownErr") }), "err", sess);
 });
 
 listen("oauth://done", (ev) => {

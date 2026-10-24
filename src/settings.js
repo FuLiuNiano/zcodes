@@ -59,31 +59,9 @@ const actions = {
         closeToTray: key === "tray" ? !state.close_to_tray : null,
         hotSwitch: key === "hot" ? !state.hot_switch : null,
         autoSwitch: key === "autoSwitch" ? !state.auto_switch : null,
-        autoContinue: key === "autoContinue" ? !state.auto_continue : null,
       });
       await refresh(); render();
       toast(t("s.savedToast"));
-    });
-  },
-
-  async saveContinueText() {
-    const input = document.querySelector(".settings input.continue-text");
-    if (!input) return;
-    await guard(async () => {
-      await invoke("set_behavior", { autoContinueText: input.value });
-      toast(t("s.savedToast"));
-      await refresh(); render();
-    });
-  },
-
-  async checkContinue() {
-    await guard(async () => {
-      const r = await invoke("continue_diagnostics");
-      if (r && r.ok) {
-        toast(t("s.continueOk", { rt: r.runtime }), "ok", `${r.cli}${r.version ? " · " + r.version : ""}`);
-      } else {
-        toast(t("s.continueBad"), "err", (r && r.error) || t("m.unknownErr"));
-      }
     });
   },
 
@@ -202,16 +180,6 @@ function render() {
       ${toggle(s.close_to_tray, "actions.toggleBehavior('tray')", t("s.closeTray"), t("s.closeTrayDesc"))}
       ${toggle(s.hot_switch, "actions.toggleBehavior('hot')", t("s.hotSwitch"), t("s.hotSwitchDesc"))}
       ${toggle(s.auto_switch, "actions.toggleBehavior('autoSwitch')", t("s.autoSwitch"), t("s.autoSwitchDesc"))}
-      ${toggle(s.auto_continue, "actions.toggleBehavior('autoContinue')", t("s.autoContinue"), t("s.autoContinueDesc"))}
-      <div class="path-line" style="margin-top:6px">
-        <input class="zcode-path continue-text" type="text" value="${esc(s.auto_continue_text || "")}"
-          placeholder="${t("s.continueTextPh")}" keydown="onContinueKey(event)">
-        <button class="btn-ghost" click="actions.saveContinueText()">${t("common.save")}</button>
-      </div>
-      <div class="lib-row" style="margin-top:6px">
-        <button class="btn-ghost" click="actions.checkContinue()">${t("s.continueCheck")}</button>
-      </div>
-      <div class="hint">${t("s.continueCheckDesc")}</div>
       <label style="margin-top:14px">${t("s.authLabel")}</label>
       ${toggle(s.auth_proxy_on, "actions.toggleAuthProxy()", t("s.proxyToggle"), t("s.proxyToggleDesc"))}
       <div class="path-line" style="margin-top:6px">
@@ -238,7 +206,6 @@ function render() {
 window.actions = actions;
 window.onPathKey = (e) => { if (e.key === "Enter") actions.savePath(); };
 window.onProxyKey = (e) => { if (e.key === "Enter") actions.saveProxy(); };
-window.onContinueKey = (e) => { if (e.key === "Enter") actions.saveContinueText(); };
 installDelegation();
 
 listen("state-changed", () => {

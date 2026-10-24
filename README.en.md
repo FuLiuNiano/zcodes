@@ -12,8 +12,7 @@ A Tauri 2 desktop tool for one-click switching between multiple ZCode accounts, 
 - **Add accounts**: OAuth login for new accounts inside the tool (BigModel / z.ai entries), never touching the current login
 - **Quota display**: inline plan quota and reset time per account row, multi-plan grouping
 - **Claim promotions**: one-click claim for eligible promotions; "Auto claim" toggle (off by default) checks and claims periodically — manual actions take priority
-- **Auto switch on empty quota** (off by default): checks the active account every 3 min; when its model quota is exhausted, switches to the next account that still has quota via a hot swap — ZCode is not closed, and the client is reloaded in place (retries after 30 min if all are empty)
-- **Auto continue on error** (off by default, Windows only): watches the ZCode log for failed turns (`turn-ended outcome=failed/error`); when a turn stops with an error and nothing resumes, it delivers the continue text (default "继续", editable in Settings) to **that exact session** through the bundled ZCode CLI (`--resume <sessionId>`) without stealing focus; if the CLI cannot be located it reports an error instead of typing into whatever chat is currently open
+- **Auto switch on empty quota** (off by default): checks the active account every 3 min and judges exhaustion **for the model currently in use**; when that model is out of quota it hot-swaps to the next account that still has quota for it (ZCode is not closed; restart ZCode if the UI still shows the old account); retries after 30 min when every account is empty
 - **Encrypted import / export**: `.zsb` bundle, PBKDF2(100k) + AES-256-GCM password encryption
 - **Bilingual UI (中文 / English)**: one-click switch in Settings — main window, tray, error messages and CLI output all covered; first run follows your OS language
 - **Tray / autostart / CLI automation**

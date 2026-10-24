@@ -144,10 +144,6 @@ pub struct Settings {
     pub auto_claim: Option<bool>,
     #[serde(default)]
     pub auto_switch: Option<bool>,
-    #[serde(default)]
-    pub auto_continue: Option<bool>,
-    #[serde(default)]
-    pub auto_continue_text: Option<String>,
 }
 
 impl Settings {
@@ -156,10 +152,6 @@ impl Settings {
     pub fn hot_switch(&self) -> bool { self.hot_switch.unwrap_or(false) }
     pub fn auto_claim(&self) -> bool { self.auto_claim.unwrap_or(false) }
     pub fn auto_switch(&self) -> bool { self.auto_switch.unwrap_or(false) }
-    pub fn auto_continue(&self) -> bool { self.auto_continue.unwrap_or(false) }
-    pub fn auto_continue_text(&self) -> &str {
-        self.auto_continue_text.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("继续")
-    }
     pub fn auth_proxy(&self) -> Option<&str> {
         if self.auth_proxy_on.unwrap_or(false) {
             self.auth_proxy_url.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -199,8 +191,6 @@ pub struct AppState {
     pub hot_switch: bool,
     pub auto_claim: bool,
     pub auto_switch: bool,
-    pub auto_continue: bool,
-    pub auto_continue_text: String,
     pub auth_proxy_on: bool,
     pub auth_proxy_url: Option<String>,
     pub language: String,
@@ -1533,10 +1523,57 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         hot_switch: settings.hot_switch(),
         auto_claim: settings.auto_claim(),
         auto_switch: settings.auto_switch(),
-        auto_continue: settings.auto_continue(),
-        auto_continue_text: settings.auto_continue_text().to_string(),
         auth_proxy_on: settings.auth_proxy_on.unwrap_or(false),
         auth_proxy_url: settings.auth_proxy_url.clone(),
         language: crate::i18n::current().as_str().to_string(),
     })
+}
+
+/// 当前正在使用的模型名（取 ZCode CLI 日志里最后一条 "model":"<providerId>/<modelId>"）。
+/// 「额度用尽自动切换」必须按正在用的模型判断，否则只打光某个模型时不会触发。
+pub fn current_model() -> Option<String> {
+    let zcode_dir = Paths::detect().zcode_dir();
+    for back in 0..2i64 {
+        let day = (chrono::Local::now() - chrono::Duration::days(back))
+            .format("%Y-%m-%d")
+            .to_string();
+        let path = zcode_dir.join("cli").join("log").join(format!("zcode-{day}.jsonl"));
+        if let Some(m) = last_model_in(&path) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn last_model_in(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let take = len.min(512 * 1024);
+    if take == 0 {
+        return None;
+    }
+    f.seek(SeekFrom::Start(len - take)).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines().rev() {
+        let Some(idx) = line.rfind("\"model\":\"") else {
+            continue;
+        };
+        let rest = &line[idx + 9..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let raw = rest[..end].trim();
+        if raw.is_empty() {
+            continue;
+        }
+        // "account:zai-start-plan/GLM-5.3-Flash" → "GLM-5.3-Flash"
+        let model = raw.split_once('/').map(|(_, m)| m).unwrap_or(raw).trim();
+        if !model.is_empty() {
+            return Some(model.to_string());
+        }
+    }
+    None
 }
